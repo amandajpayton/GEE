@@ -1,0 +1,235 @@
+//------------------------------------------------------------------------------
+//Calculate Difference Quantity, Exchange, and Shift
+//by Amanda Payton, Wei Hong Loh, Wenqu Chen 
+//Clark University, 2019
+//This code calculates the Quantity, Exchange, and Shift for an error matrix and 
+// for individual categories within an error matrix. The calculations are based 
+// on chapter 4 of Metrics that Make a Difference by Gil Pontius (2019).
+//------------------------------------------------------------------------------
+
+//--------------------
+//Step 1: Input Matrix
+//--------------------
+
+//To create a confusion matrix in GEE from a classification:
+//----------------------------------------------------------
+var my_classifier = classifier; //<-- enter your trained classifier here
+
+//The following creates a confusion matrix as an array
+var errorArray = my_classifier.confusionMatrix().array();
+print("Error Matrix", errorArray);
+
+//To input a confusion matrix directly:
+//-------------------------------------
+var my_matrix = ee.Array(errorArray); // <-- enter matrix here
+//make sure your matrix is formatted as an array with true values in rows and diagnosed values in columns
+
+//--------------------------------------------------------------------
+//Step 2: Calculate Quantity, Exchange, and Shift for the entire table:
+//--------------------------------------------------------------------
+
+//The following identifies the number of categories in the matrix and creates a list of numbers the same length
+var catNumber = my_matrix.length().toList().get(1);
+var end = ee.Number(catNumber).subtract(1);
+var list = ee.List.sequence(0,end);
+
+//The following calculates hits, misses, and false alarms
+//-------------------------------------------------------
+//Hits
+var hits = my_matrix.matrixDiagonal();
+//print('Hits',hits);
+
+//Misses
+var rowTotals = my_matrix.reduce({
+  reducer:ee.Reducer.sum(),
+  axes:[1]
+  });
+//print('Total Row (True)', rowTotals);
+var misses = rowTotals.subtract(hits);
+//print('Misses',misses);
+
+//False Alarms
+var columnTotals = my_matrix.reduce({
+  reducer:ee.Reducer.sum(),
+  axes:[0]
+  });
+var formatColumns = list.map(function(i){
+  var number = columnTotals.get([0,i]);
+  return [number];
+});
+// print('Total Column (Diagnosed)',formatColumns);
+var falseAlarms = ee.Array(formatColumns).subtract(hits);
+//print('False Alarms',falseAlarms);
+
+//The following calculates the Difference Quantity for Extent
+// Difference Quantity = Dq = ∑|Mk - Fk| / 2
+//-----------------------------------------------------------
+var difference = misses.subtract(falseAlarms).abs();
+var reduceDiff = difference.reduce({
+  reducer:ee.Reducer.sum(),
+  axes:[0]
+});
+var quantDiff = reduceDiff.get([0,0]).divide(2);
+
+//The following calculates the Difference Exchange for Extent
+// Difference Exchange = De = ∑∑ min(Nij, Nji) - hits
+//-----------------------------------------------------------
+var minimum = list.map(function(i){
+  var min = list.map(function(j){
+    var a = my_matrix.get([i,j]);
+    var b = my_matrix.get([j,i]);
+    return a.min(b);
+  });
+  return [min.reduce({reducer:ee.Reducer.sum()})];
+});
+var reduceMin = ee.Array(minimum).subtract(hits).reduce({
+  reducer:ee.Reducer.sum(),
+  axes:[0]
+});
+var exchDiff = reduceMin.get([0,0]);
+
+//The following calculates the Shift Difference
+//Difference Shift = Ds = D - Dq - De
+//------------------------------------------------------------
+var totDiff = misses.reduce({
+  reducer:ee.Reducer.sum(),
+  axes:[0]
+}).get([0,0]);
+var shiftDiff = totDiff.subtract(quantDiff).subtract(exchDiff);
+
+//Display Results
+//---------------
+print("Size Totals for Extent","Quantity Difference:",quantDiff, "Exchange Difference", 
+  exchDiff,"Shift Difference:", shiftDiff);
+
+//---------------------------------------------------------------------
+//Step 3: Calculate Quantity, Exchange, and Shift for a single category:
+//---------------------------------------------------------------------
+
+//Identify category number of interest
+//------------------------------------
+var cat = 12; // <-- enter the number of the category of interest here
+
+//The following identifies the number of categories in the matrix and creates a list of numbers the same length
+// var catNumber = my_matrix.length().toList().get(1);
+// var end = ee.Number(catNumber).subtract(1);
+// var list = ee.List.sequence(0,end);
+
+
+//The following gets row total (quantity in truth) 
+//------------------------------------------------
+var getRow = list.map(function (i) {
+  var number = my_matrix.get([cat,i]);
+  return number;
+});
+//print(getRow);
+var rowTotal = ee.Number(getRow.reduce(ee.Reducer.sum()));
+
+//The following gets column total (quantity in diagnosis)
+//-------------------------------------------------------
+var getColumn = list.map(function (i) {
+  var number = my_matrix.get([i,cat]);
+  return number;
+});
+//print(getColumn);
+var columnTotal = ee.Number(getColumn.reduce(ee.Reducer.sum()));
+
+//The following subtracts the hits to get misses and false alarms for the category
+//--------------------------------------------------------------------------------
+var hit = my_matrix.get([cat,cat]);
+var fa = columnTotal.subtract(hit);
+var miss = rowTotal.subtract(hit);
+// print("Hits in Category:",hit,"Misses in Category:",miss,"False Alarms in Category:", fa);
+
+//The following calculates Quantity in the category
+//Dqk = |miss-fa|
+//------------------------------------------------
+var quantity = miss.subtract(fa).abs();
+
+
+//The following calculates Exchange in the category
+//Dek = 2∗∑ min(Nij, Nji)
+//-------------------------------------------------
+var getExchange = list.map(function (i) {
+  var number1 = my_matrix.get([i,cat]);
+  var number2 = my_matrix.get([cat,i]);
+  var number = number1.min(number2);
+  return number;
+});
+//print(getExchange);
+var exchange = ee.Number(getExchange.reduce(ee.Reducer.sum())).subtract(hit).multiply(2);
+
+//The following calculates Shift in the category
+//Dsk = Dk - Dek - Dqk
+//------------------------------------------------
+var catDiff = fa.add(miss);
+var shift = catDiff.subtract(exchange).subtract(quantity);
+
+//Display results
+//---------------
+print("Size Totals for Category:", cat,"Quantity in Category:",quantity, "Exchange in Category:",
+  exchange, "Shift in Category:", shift);
+
+//-----------------------------------------
+//Step 4: Calculate Intensities for extent:
+//-----------------------------------------
+
+//The following calculates the extent:
+//------------------------------------
+var addRows = rowTotals.reduce({
+  reducer:ee.Reducer.sum(),
+  axes:[0]
+  });
+var extent = addRows.get([0,0]);
+//print('Extent', extent);
+
+//The following calculates quantity intensity of difference in the extent
+//Quantity Intensity Difference = Dq * 100% / extent
+//------------------------------------------------------------------------
+var quantIntensity = quantDiff.multiply(100).divide(extent);
+
+//The following calculates exchange intensity of difference in the extent
+//Exchange Intensity Difference = De * 100% / extent
+//-----------------------------------------------------------------------
+var exchangeIntensity = exchDiff.multiply(100).divide(extent);
+
+//The following calculates shift intensity of difference in the extent
+//Shift Intensity Difference = Ds * 100% / extent
+//--------------------------------------------------------------------
+var shiftIntensity = shiftDiff.multiply(100).divide(extent);
+
+//The following calculates intensity of difference in the extent
+//Intensity Difference = D * 100% / extent 
+//--------------------------------------------------------------
+var totDiff = quantDiff.add(exchDiff).add(shiftDiff);
+var diffIntensity = totDiff.multiply(100).divide(extent);
+
+//Display results
+//---------------
+print("Intensity Totals for Extent",  "Quantity Difference:", quantIntensity, "Exchange Difference:", 
+    exchangeIntensity,"Shift Difference:", shiftIntensity, "Difference Intensity:", diffIntensity);
+
+//----------------------------------------------------
+//Step 5: Calculate Intensities for a single category:
+//----------------------------------------------------
+
+//The following calculates quantity intensity of difference in the category
+//Quantity Intensity Difference k = Dqk * 100% / Dk
+//--------------------------------------------------------------------------
+var quantIntK = quantity.divide(catDiff).multiply(100);
+
+//The following calculates exchange intensity of difference in the category
+//Exchange Intensity Difference k = Dek * 100% / Dk
+//-------------------------------------------------------------------------
+var exchIntK = exchange.divide(catDiff).multiply(100);
+
+//The following calculates shift intensity of difference in the category
+//Shift Intensity Difference k = Dsk * 100% / Dk
+//-----------------------------------------------------------------------
+var shiftIntK = shift.divide(catDiff).multiply(100);
+
+//Display results
+//---------------
+print("Intensity Totals for Category:", cat,"Quantity Difference in Category:",quantIntK, 
+  "Exchange Difference in Category:",exchIntK, "Shift Difference in Category:", shiftIntK);
+
